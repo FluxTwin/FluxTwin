@@ -1,4 +1,3 @@
-
 import os
 import io
 from datetime import datetime
@@ -11,13 +10,13 @@ from dotenv import load_dotenv
 
 from utils.pdf_report import generate_pdf
 
-# Optional OpenAI import (only used if API key is provided)
+# Optional OpenAI (used only if you add a key)
 try:
     from openai import OpenAI
 except Exception:
     OpenAI = None
 
-# Forecasting (statsmodels)
+# Forecasting
 try:
     from statsmodels.tsa.holtwinters import ExponentialSmoothing
 except Exception:
@@ -34,6 +33,7 @@ st.set_page_config(
 st.title("⚡ FluxTwin — Energy Analytics MVP")
 st.caption("Upload data, get analysis, AI summary (optional), 7–30 day forecast, and export a PDF report.")
 
+# ------------------------ SIDEBAR ------------------------
 with st.sidebar:
     st.header("Settings")
     price_per_kwh = st.number_input("Electricity price (€ / kWh)", value=0.25, min_value=0.0, step=0.01)
@@ -47,9 +47,7 @@ with st.sidebar:
     except FileNotFoundError:
         st.info("`assets/sample_data.csv` not found in this deployment.")
 
-st.subheader("Upload your CSV (columns: timestamp, consumption_kwh)")
-uploaded = st.file_uploader("Drag & drop or browse your CSV file", type=["csv"])
-
+# ------------------------ HELPERS ------------------------
 def get_openai_api_key() -> str:
     try:
         key = st.secrets.get("OPENAI_API_KEY", "")
@@ -79,8 +77,8 @@ def safe_read_csv(file) -> pd.DataFrame:
 
 def fit_daily_forecast(daily_series: pd.Series, days_ahead: int = 7):
     """
-    Fits a simple Holt-Winters model (additive trend) on daily totals.
-    If statsmodels isn't available or the series is too short, falls back to naive mean forecast.
+    Holt–Winters on daily totals when possible; otherwise naive mean.
+    Returns: (forecast_series, method_tag)
     """
     if len(daily_series) < 7 or ExponentialSmoothing is None:
         mean_val = float(daily_series.tail(14).mean()) if len(daily_series) >= 1 else 0.0
@@ -98,14 +96,19 @@ def fit_daily_forecast(daily_series: pd.Series, days_ahead: int = 7):
         idx = pd.date_range(daily_series.index.max() + pd.Timedelta(days=1), periods=days_ahead, freq="D")
         return pd.Series([mean_val]*days_ahead, index=idx), "naive-mean"
 
+# ------------------------ MAIN ------------------------
+st.subheader("Upload your CSV (columns: timestamp, consumption_kwh)")
+uploaded = st.file_uploader("Drag & drop or browse your CSV file", type=["csv"])
+
 if uploaded:
+    # Parse
     try:
         df = safe_read_csv(uploaded)
     except Exception as e:
         st.error(f"Could not read CSV: {e}")
         st.stop()
 
-    # KPIs
+    # KPIs (based on uploaded data)
     total_kwh = float(df["consumption_kwh"].sum())
     mean_kwh = float(df["consumption_kwh"].mean())
     max_kwh = float(df["consumption_kwh"].max())
@@ -118,7 +121,7 @@ if uploaded:
     c3.metric("Max hourly", f"{max_kwh:,.2f} kWh")
     c4.metric("Estimated cost", f"{total_cost:,.2f} €")
 
-    # Chart
+    # Raw consumption chart (history only)
     st.subheader("Consumption chart")
     fig, ax = plt.subplots()
     ax.plot(df["timestamp"], df["consumption_kwh"])
@@ -132,11 +135,12 @@ if uploaded:
     daily_df = daily.reset_index().rename(columns={"consumption_kwh": "daily_kwh"})
     st.dataframe(daily_df)
 
-    # Forecast
+    # -------- Forecast --------
     st.subheader("Forecast (daily kWh)")
     forecast_series, model_used = fit_daily_forecast(daily, days_ahead=forecast_days)
     st.caption(f"Method: {'Holt-Winters' if model_used=='holt-winters' else 'Naive mean of recent values'}")
 
+    # Forecast chart (history + forecast)
     fig_f, ax_f = plt.subplots()
     ax_f.plot(daily.index, daily.values, label="History")
     ax_f.plot(forecast_series.index, forecast_series.values, label="Forecast")
@@ -145,7 +149,14 @@ if uploaded:
     ax_f.legend()
     st.pyplot(fig_f)
 
-    # AI summary (optional)
+    # >>> NEW: forecast totals & cost <<<
+    forecast_total_kwh = float(forecast_series.sum())
+    forecast_cost = float(forecast_total_kwh * price_per_kwh)
+    c5, c6 = st.columns(2)
+    c5.metric("Forecast total consumption", f"{forecast_total_kwh:,.2f} kWh")
+    c6.metric("Estimated cost (forecast)", f"{forecast_cost:,.2f} €")
+
+    # -------- AI summary (optional) --------
     st.subheader("AI summary")
     api_key = get_openai_api_key()
     if api_key and OpenAI is not None:
@@ -155,7 +166,8 @@ if uploaded:
                 "Write an executive energy report in English for a Cyprus-based business.\n"
                 f"Data: total_kWh={total_kwh:.2f}, avg_hourly={mean_kwh:.2f}, "
                 f"max_hourly={max_kwh:.2f}, min_hourly={min_kwh:.2f}, est_cost_eur={total_cost:.2f}.\n"
-                f"Next {len(forecast_series)}-day forecast daily_kWh: {', '.join([f'{v:.2f}' for v in forecast_series.values])}.\n"
+                f"Next {len(forecast_series)}-day forecast total_kWh={forecast_total_kwh:.2f}, "
+                f"forecast_cost_eur={forecast_cost:.2f}.\n"
                 "Provide 4–6 actionable, domain-specific recommendations (load shifting, HVAC, lighting, scheduling, PV/battery ROI). "
                 "Keep it concise, use bullet points, avoid fluff."
             )
@@ -166,7 +178,8 @@ if uploaded:
                 "⚠️ AI summary unavailable right now. Showing demo text.\n"
                 f"• Total consumption {total_kwh:,.2f} kWh; average hourly {mean_kwh:,.2f} kWh.\n"
                 f"• Estimated period cost: {total_cost:,.2f} €.\n"
-                f"• {len(forecast_series)}-day forecast average: {float(np.mean(forecast_series.values)):.2f} kWh/day.\n"
+                f"• {len(forecast_series)}-day forecast total: {forecast_total_kwh:,.2f} kWh "
+                f"(~{forecast_cost:,.2f} € at current price).\n"
                 "• Consider shifting loads off-peak and optimizing HVAC/lighting during 09:00–18:00."
             )
             st.warning(f"AI call failed: {e}")
@@ -175,15 +188,16 @@ if uploaded:
             "🎯 Demo summary (no API key detected):\n"
             f"• Total consumption {total_kwh:,.2f} kWh; average hourly {mean_kwh:,.2f} kWh.\n"
             f"• Estimated period cost: {total_cost:,.2f} €.\n"
-            f"• {len(forecast_series)}-day forecast average: {float(np.mean(forecast_series.values)):.2f} kWh/day.\n"
+            f"• {len(forecast_series)}-day forecast total: {forecast_total_kwh:,.2f} kWh "
+            f"(~{forecast_cost:,.2f} € at current price).\n"
             "• Consider shifting loads off-peak and optimizing HVAC/lighting during 09:00–18:00."
         )
     st.text_area("AI summary text", ai_text, height=180)
 
-    # Export PDF
+    # -------- Export PDF --------
     st.subheader("Export report")
     if st.button("Generate PDF"):
-        # Save charts to PNG bytes
+        # Save consumption chart
         buf_hist = io.BytesIO()
         fig2, ax2 = plt.subplots()
         ax2.plot(df["timestamp"], df["consumption_kwh"])
@@ -192,6 +206,7 @@ if uploaded:
         fig2.savefig(buf_hist, format="png", bbox_inches="tight")
         hist_png = buf_hist.getvalue()
 
+        # Save forecast chart
         buf_fore = io.BytesIO()
         fig3, ax3 = plt.subplots()
         ax3.plot(daily.index, daily.values, label="History")
@@ -208,6 +223,10 @@ if uploaded:
             "max_kwh": max_kwh,
             "min_kwh": min_kwh,
             "total_cost_eur": total_cost,
+            # (προαιρετικά: δεν τυπώνονται στον τωρινό PDF πίνακα,
+            # αλλά τα κρατάμε αν θέλουμε να τα προσθέσουμε αργότερα)
+            "forecast_total_kwh": forecast_total_kwh,
+            "forecast_cost_eur": forecast_cost,
         }
         daily_rows = [[str(idx.date()), f"{float(val):,.2f}"] for idx, val in daily.items()]
         forecast_rows = [[str(idx.date()), f"{float(val):,.2f}"] for idx, val in forecast_series.items()]
@@ -228,3 +247,4 @@ if uploaded:
             st.download_button("Download PDF report", f, file_name="FluxTwin_Report.pdf", mime="application/pdf")
 else:
     st.info("Upload the sample_data.csv or your own file to start the analysis.")
+
