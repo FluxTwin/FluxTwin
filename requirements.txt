@@ -5,3 +5,4 @@ reportlab>=4.2
 python-dotenv>=1.0
 statsmodels>=0.14
 openai>=1.40
+plotly>=5.22
