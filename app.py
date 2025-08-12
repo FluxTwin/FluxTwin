@@ -1,20 +1,53 @@
-# app.py — FluxTwin (AI + Holt-Winters Forecast, cost before/after, single-file)
+# app.py — FluxTwin Enterprise (AI Advisor + Holt-Winters Forecast + Sections + PDF)
 from __future__ import annotations
+import io
 import json
 from datetime import datetime
+
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-# Optional OpenAI (AI advisor). If not present or no key, we'll fallback to rules.
+# Optional OpenAI (AI advisor). If not present or no key → fallback to rules.
 try:
     from openai import OpenAI
 except Exception:
     OpenAI = None
 
-# ------------- PAGE CONFIG -------------
-st.set_page_config(page_title="FluxTwin — Live Energy Advisor", layout="wide")
+# PDF (ReportLab)
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import cm
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+
+# ------------- PAGE CONFIG & THEME -------------
+st.set_page_config(page_title="FluxTwin — Enterprise Energy Intelligence", layout="wide")
+CUSTOM_CSS = """
+<style>
+:root {
+  --ft-bg: #0b1220;
+  --ft-card: #10182a;
+  --ft-accent: #4ea1ff;
+  --ft-text: #ecf2ff;
+  --ft-muted: #94a3b8;
+}
+html, body, .stApp { background: var(--ft-bg) !important; color: var(--ft-text) !important; }
+h1, h2, h3, h4 { color: var(--ft-text) !important; }
+.ft-card {
+  background: var(--ft-card);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 18px;
+  padding: 18px 18px 8px 18px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.25);
+}
+.ft-kpi { font-size: 14px; color: var(--ft-muted); margin-bottom: 4px; }
+.ft-kpi-val { font-size: 22px; font-weight: 700; color: var(--ft-text); }
+hr { border: none; height: 1px; background: rgba(255,255,255,0.1); margin: 18px 0; }
+</style>
+"""
+st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 # ------------- HELPERS (DATA) -------------
 def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -89,9 +122,8 @@ def forecast_daily(df: pd.DataFrame, horizon_days: int = 7) -> pd.DataFrame:
         idx = pd.date_range(s.index.max() + pd.Timedelta(days=1), periods=horizon_days, freq="D")
         return pd.DataFrame({"date": idx, "forecast_kwh": [mean]*horizon_days, "method": "naive-mean"})
 
-    # Try Holt-Winters
     try:
-        # Lazy import to be compatible with multiple Python versions on Streamlit Cloud
+        # Lazy import for wider compatibility on Streamlit Cloud
         from statsmodels.tsa.holtwinters import ExponentialSmoothing
         model = ExponentialSmoothing(s, trend="add", seasonal=None).fit()
         f = model.forecast(horizon_days)
@@ -161,28 +193,24 @@ def rule_based_advice(profile: dict, forecast_df: pd.DataFrame | None) -> dict:
 # ------------- AI ADVISOR (OpenAI JSON) -------------
 def ai_advice_openai(profile: dict, kpis: dict, fc_df: pd.DataFrame, api_key: str, model: str = "gpt-4o-mini") -> dict:
     """
-    Calls OpenAI and returns dict: { tips: [..], expected_savings_pct: 0.xx }
-    Uses JSON structured output for stability. Falls back to rules on error.
+    Returns dict: { tips: [..], expected_savings_pct: 0.xx }
+    JSON structured output for stability. Fallback to rules on error.
     """
     if OpenAI is None or not api_key:
         return rule_based_advice(profile, fc_df)
 
     client = OpenAI(api_key=api_key)
-    # Keep context small & structured
     payload = {
         "profile": profile,
         "kpis": kpis,
         "forecast": fc_df[["date", "forecast_kwh"]].assign(date=lambda d: d["date"].astype(str)).to_dict(orient="records"),
     }
     sys = (
-        "You are an energy-efficiency expert. "
-        "Return a compact JSON with 'tips' (list of concise, actionable steps) and "
-        "'expected_savings_pct' (0..0.25 realistic). Target concrete actions for the next 7 days."
+        "You are an enterprise energy-efficiency expert. "
+        "Return a compact JSON with keys: 'tips' (list of concise, actionable steps) and "
+        "'expected_savings_pct' (float 0..0.30 realistic). Tailor to the next 7 days."
     )
-    user = (
-        "Generate tailored actions to reduce electricity cost based on the provided profile, KPIs and forecast. "
-        "Avoid generic statements. Be precise about timing (off-peak), HVAC setpoints, load shifting, and PV usage."
-    )
+    user = "Generate precise actions (off-peak timing, HVAC setpoints, load shifting, PV usage)."
     try:
         resp = client.chat.completions.create(
             model=model,
@@ -193,36 +221,124 @@ def ai_advice_openai(profile: dict, kpis: dict, fc_df: pd.DataFrame, api_key: st
                 {"role": "user", "content": f"INPUT:\n{json.dumps(payload)}\n\n{user}"},
             ],
         )
-        content = resp.choices[0].message.content
-        data = json.loads(content)
+        data = json.loads(resp.choices[0].message.content)
         tips = data.get("tips") or []
         pct = float(data.get("expected_savings_pct", 0.12))
-        # Clamp to sane range
         pct = float(np.clip(pct, 0.02, 0.30))
-        # If tips too few, add a couple of robust ones
         if len(tips) < 3:
             tips += rule_based_advice(profile, fc_df)["tips"][:3]
         return {"tips": tips, "expected_savings_pct": pct}
     except Exception:
-        # Any error → safe fallback
         return rule_based_advice(profile, fc_df)
 
 
-# ------------- UI: SIDEBAR -------------
-st.sidebar.title("Settings")
-price = st.sidebar.number_input("Electricity price (€/kWh)", min_value=0.0, value=0.25, step=0.01)
+# ------------- PDF (ReportLab) -------------
+def _pdf_styles():
+    ss = getSampleStyleSheet()
+    title = ParagraphStyle("TitleX", parent=ss["Title"], fontSize=20, leading=24, spaceAfter=10)
+    h2    = ParagraphStyle("H2", parent=ss["Heading2"], fontSize=14, spaceBefore=10, spaceAfter=6)
+    body  = ParagraphStyle("Body", parent=ss["BodyText"], fontSize=10, leading=14)
+    mono  = ParagraphStyle("Mono", parent=ss["BodyText"], fontName="Helvetica", fontSize=9)
+    bullet = ParagraphStyle("Bullet", parent=body, leftIndent=12, bulletIndent=6, spaceAfter=4)
+    return title, h2, body, mono, bullet
+
+def build_pdf(
+    df: pd.DataFrame,
+    price_eur_per_kwh: float,
+    forecast_df: pd.DataFrame,
+    tips: list[str],
+    savings_pct: float,
+    project: str,
+) -> bytes:
+    title, h2, body, mono, bullet = _pdf_styles()
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=2*cm, rightMargin=2*cm, topMargin=1.5*cm, bottomMargin=1.5*cm)
+    story = []
+
+    story += [Paragraph("FluxTwin — Energy Report", title),
+              Paragraph(f"Project: {project}", mono),
+              Paragraph(f"Generated: {datetime.now():%Y-%m-%d %H:%M}", mono),
+              Spacer(1, 6)]
+
+    # KPIs
+    total = float(df["consumption_kwh"].sum())
+    avg   = float(df["consumption_kwh"].mean()) if len(df) else 0.0
+    mx    = float(df["consumption_kwh"].max()) if len(df) else 0.0
+    mn    = float(df["consumption_kwh"].min()) if len(df) else 0.0
+    baseline_cost = total * float(price_eur_per_kwh)
+
+    story += [Paragraph("Current period — KPIs", h2)]
+    kpi_tbl = Table(
+        [["Metric","Value"],
+         ["Total consumption (kWh)", f"{total:,.2f}"],
+         ["Average sample (kWh)", f"{avg:,.2f}"],
+         ["Max sample (kWh)", f"{mx:,.2f}"],
+         ["Min sample (kWh)", f"{mn:,.2f}"],
+         ["Baseline cost (this period)", f"{baseline_cost:,.2f} €"]],
+        colWidths=[8*cm, 7*cm],
+    )
+    kpi_tbl.setStyle(TableStyle([
+        ("BACKGROUND",(0,0),(-1,0), colors.lightgrey),
+        ("GRID",(0,0),(-1,-1), 0.25, colors.grey),
+        ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+        ("ALIGN",(1,1),(-1,-1),"RIGHT"),
+    ]))
+    story += [kpi_tbl, Spacer(1,10)]
+
+    # Forecast summary & costs
+    if isinstance(forecast_df, pd.DataFrame) and "forecast_kwh" in forecast_df:
+        story += [Paragraph("Forecast (7–30 days) — summary", h2)]
+        tot_fc = float(forecast_df["forecast_kwh"].sum())
+        cost_no_action = tot_fc * float(price_eur_per_kwh)
+        cost_after = cost_no_action * (1.0 - float(savings_pct))
+        savings_eur = cost_no_action - cost_after
+
+        c_tbl = Table(
+            [["Metric","Value"],
+             ["Forecast method", forecast_df["method"].iloc[0]],
+             ["Forecast total (kWh)", f"{tot_fc:,.0f}"],
+             ["Estimated cost (no action)", f"{cost_no_action:,.2f} €"],
+             [f"Estimated cost (after actions, -{savings_pct*100:.1f}%)", f"{cost_after:,.2f} €"],
+             ["Estimated savings (€)", f"{savings_eur:,.2f} €"]],
+            colWidths=[8*cm, 7*cm],
+        )
+        c_tbl.setStyle(TableStyle([
+            ("BACKGROUND",(0,0),(-1,0), colors.whitesmoke),
+            ("GRID",(0,0),(-1,-1), 0.25, colors.grey),
+            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+            ("ALIGN",(1,1),(-1,-1),"RIGHT"),
+        ]))
+        story += [c_tbl, Spacer(1,10)]
+
+    # Recommendations
+    story += [Paragraph("Next 7 Days — Action plan", h2)]
+    for t in tips:
+        story.append(Paragraph(f"• {t}", bullet))
+    story += [Spacer(1,8)]
+    story += [Paragraph("Note: Savings are indicative, based on profile & operational patterns.", mono)]
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+# ------------- SIDEBAR -------------
+st.sidebar.title("FluxTwin — Controls")
 project_name = st.sidebar.text_input("Project name", value="FluxTwin")
+price = st.sidebar.number_input("Electricity price (€/kWh)", min_value=0.0, value=0.25, step=0.01)
 mode = st.sidebar.selectbox("Data mode", ["Upload CSV", "Live simulation (in-app)", "Watch realtime CSV (local)"])
-ai_enabled = st.sidebar.toggle("AI Advisor (OpenAI)", value=True)
 horizon = st.sidebar.slider("Forecast horizon (days)", 7, 30, 7)
-usage_type = st.sidebar.selectbox("Usage type", ["Household", "Office", "Hotel", "Factory"], index=1)
+
+st.sidebar.markdown("---")
+usage_type = st.sidebar.selectbox("Usage type", ["Household","Office","Hotel","Factory"], index=1)
 has_pv = st.sidebar.checkbox("Has PV system", value=True)
+ai_enabled = st.sidebar.toggle("AI Advisor (OpenAI)", value=True)
+st.sidebar.caption("If AI=ON, set OPENAI_API_KEY in Streamlit Secrets.")
 
 # ------------- DATA SOURCE -------------
 data = pd.DataFrame(columns=["timestamp", "consumption_kwh", "production_kwh"])
 
 if mode == "Upload CSV":
-    uploaded = st.file_uploader("Upload CSV (columns: timestamp, consumption_kwh[, production_kwh])", type=["csv"])
+    uploaded = st.file_uploader("Upload CSV (timestamp, consumption_kwh[, production_kwh])", type=["csv"])
     if uploaded:
         data = load_csv_any(uploaded)
 
@@ -243,90 +359,130 @@ elif mode == "Watch realtime CSV (local)":
     if st.button("Refresh now"):
         data = load_csv_any(path)
 
-# ------------- MAIN UI -------------
-st.title("⚡ FluxTwin — Live Energy Advisor")
-st.caption("Upload data or stream it live. See forecasted cost, AI recommendations, and expected savings.")
+# ------------- LAYOUT: ENTERPRISE SECTIONS -------------
+st.title("⚡ FluxTwin — Enterprise Energy Intelligence")
+st.caption("Operational visibility • Forecasted cost • AI actions • Measurable savings")
 
 if data.empty or "consumption_kwh" not in data.columns:
-    st.warning("No data to display yet. Upload a file or generate a few ticks in Live simulation.")
+    st.warning("No data yet. Upload a CSV or generate Live simulation ticks.")
     st.stop()
 
 data = standardize_columns(data)
 
-# KPIs (dataset)
-total = float(data["consumption_kwh"].sum())
-avg = float(data["consumption_kwh"].mean()) if len(data) else 0.0
-mx = float(data["consumption_kwh"].max()) if len(data) else 0.0
+# SECTION 1 — CURRENT PERIOD (NOW)
+st.markdown("### 1) Current period — where you stand today")
+with st.container():
+    colA, colB, colC, colD = st.columns(4)
+    total_now = float(data["consumption_kwh"].sum())
+    avg_now = float(data["consumption_kwh"].mean()) if len(data) else 0.0
+    max_now = float(data["consumption_kwh"].max()) if len(data) else 0.0
+    est_cost_now = total_now * price
 
-# Forecast
+    with colA:
+        st.markdown('<div class="ft-card"><div class="ft-kpi">Total consumption</div><div class="ft-kpi-val">'
+                    f'{total_now:,.2f} kWh</div></div>', unsafe_allow_html=True)
+    with colB:
+        st.markdown('<div class="ft-card"><div class="ft-kpi">Average sample</div><div class="ft-kpi-val">'
+                    f'{avg_now:,.2f} kWh</div></div>', unsafe_allow_html=True)
+    with colC:
+        st.markdown('<div class="ft-card"><div class="ft-kpi">Max sample</div><div class="ft-kpi-val">'
+                    f'{max_now:,.2f} kWh</div></div>', unsafe_allow_html=True)
+    with colD:
+        st.markdown('<div class="ft-card"><div class="ft-kpi">Estimated cost (current period)</div>'
+                    f'<div class="ft-kpi-val">{est_cost_now:,.2f} €</div></div>', unsafe_allow_html=True)
+
+    # History chart
+    y_cols = ["consumption_kwh"]
+    if "production_kwh" in data.columns and data["production_kwh"].any():
+        y_cols.append("production_kwh")
+    fig_hist = px.line(
+        data, x="timestamp", y=y_cols,
+        title="Consumption (and Production) — History",
+        labels={"timestamp": "Time", "value": "kWh", "variable": "Series"},
+    )
+    st.plotly_chart(fig_hist, use_container_width=True)
+
+# SECTION 2 — FORECAST (NO ACTION)
+st.markdown("### 2) Forecast — if you change nothing (No action)")
 fc_df = forecast_daily(data, horizon_days=horizon)
 fc_total_kwh = float(fc_df["forecast_kwh"].sum()) if not fc_df.empty else 0.0
+cost_no_action = fc_total_kwh * price
 
-# Profile & KPIs object for AI
+col1, col2 = st.columns([2,1])
+with col1:
+    fc_plot = fc_df.rename(columns={"forecast_kwh":"kWh"})
+    fc_plot["kind"] = "Forecast"
+    hist_for_merge = data[["timestamp","consumption_kwh"]].rename(columns={"timestamp":"date","consumption_kwh":"kWh"})
+    hist_for_merge["kind"] = "History"
+    merged = pd.concat([hist_for_merge[["date","kWh","kind"]], fc_plot[["date","kWh","kind"]]], ignore_index=True)
+    fig_fc = px.line(merged, x="date", y="kWh", color="kind", title=f"History vs Forecast ({fc_df['method'].iloc[0]})")
+    st.plotly_chart(fig_fc, use_container_width=True)
+with col2:
+    st.markdown('<div class="ft-card"><div class="ft-kpi">Forecast total</div>'
+                f'<div class="ft-kpi-val">{fc_total_kwh:,.0f} kWh</div>'
+                '<div class="ft-kpi" style="margin-top:8px;">Estimated cost (no action)</div>'
+                f'<div class="ft-kpi-val">{cost_no_action:,.2f} €</div></div>', unsafe_allow_html=True)
+
+with st.expander("Daily forecast table (kWh & €)"):
+    tmp = fc_df.copy()
+    tmp["Estimated cost (€)"] = tmp["forecast_kwh"] * price
+    tmp = tmp.rename(columns={"date":"Date", "forecast_kwh":"Forecast (kWh)"})
+    st.dataframe(tmp, use_container_width=True)
+
+# SECTION 3 — AI ADVISOR (ACTIONS)
+st.markdown("### 3) AI Advisor — what to do in the next 7 days")
 profile = {"type": usage_type.lower(), "has_pv": has_pv, "price_eur_per_kwh": price}
-kpis = {"total_kwh": total, "avg_kwh": avg, "max_kwh": mx}
-
-# Advisor (AI or fallback)
+kpis = {"total_kwh": total_now, "avg_kwh": avg_now, "max_kwh": max_now}
 api_key = st.secrets.get("OPENAI_API_KEY", "") if hasattr(st, "secrets") else ""
+
 if ai_enabled and api_key:
+    st.caption("Powered by OpenAI.")
     advisor_out = ai_advice_openai(profile, kpis, fc_df, api_key)
 elif ai_enabled and not api_key:
     st.warning("AI is ON but no OPENAI_API_KEY found in Streamlit Secrets — using rule-based fallback.")
     advisor_out = rule_based_advice(profile, fc_df)
 else:
+    st.caption("Rule-based plan (enable AI + add OPENAI_API_KEY in Secrets for richer advice).")
     advisor_out = rule_based_advice(profile, fc_df)
 
 tips_list = advisor_out["tips"]
 savings_pct = float(advisor_out["expected_savings_pct"])
-
-# ---- TOP METRICS: COST BEFORE / AFTER ----
-est_cost_no_action = fc_total_kwh * price
-est_cost_after = est_cost_no_action * (1.0 - savings_pct)
-savings_eur = est_cost_no_action - est_cost_after
-cols_top = st.columns(4)
-cols_top[0].metric("Estimated cost (no action)", f"{est_cost_no_action:,.2f} €")
-cols_top[1].metric("Estimated cost (after actions)", f"{est_cost_after:,.2f} €")
-cols_top[2].metric("Savings (€)", f"{savings_eur:,.2f}")
-cols_top[3].metric("Savings (%)", f"{savings_pct*100:.1f}%")
-
-# ---- LIVE SNAPSHOT ----
-st.subheader("📊 Live snapshot")
-latest = data.iloc[-1]
-cons = float(latest["consumption_kwh"])
-prod = float(latest.get("production_kwh", 0.0))
-net = cons - prod
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Current Consumption", f"{cons:.2f} kWh")
-c2.metric("Current Production", f"{prod:.2f} kWh")
-c3.metric("Net Usage", f"{net:.2f} kWh")
-c4.metric("Dataset total", f"{total:,.2f} kWh")
-
-# ---- CHART: History + Forecast ----
-st.subheader("📈 History + Forecast")
-hist = data[["timestamp", "consumption_kwh"]].rename(columns={"timestamp": "date", "consumption_kwh": "kWh"})
-hist["kind"] = "History"
-fc_plot = fc_df.rename(columns={"forecast_kwh": "kWh"})
-fc_plot["kind"] = "Forecast"
-merged = pd.concat([hist[["date", "kWh", "kind"]], fc_plot[["date", "kWh", "kind"]]], ignore_index=True)
-fig = px.line(merged, x="date", y="kWh", color="kind", title="Consumption (History vs Forecast)")
-st.plotly_chart(fig, use_container_width=True)
-
-# ---- FORECAST TABLE ----
-with st.expander("Daily forecast (kWh & €)"):
-    tmp = fc_df.copy()
-    tmp["Estimated cost (€)"] = tmp["forecast_kwh"] * price
-    tmp = tmp.rename(columns={"date": "Date", "forecast_kwh": "Forecast (kWh)"})
-    st.dataframe(tmp, use_container_width=True)
-
-# ---- NEXT 7 DAYS ACTION PLAN (AI / fallback) ----
-st.subheader("🧠 Next 7 Days Action Plan")
-if ai_enabled and api_key:
-    st.caption("Powered by AI (OpenAI).")
-else:
-    st.caption("Rule-based plan (enable AI + add OPENAI_API_KEY in Secrets for richer advice).")
-
 for t in tips_list:
     st.markdown(f"- {t}")
 
+# SECTION 4 — FORECAST (AFTER ACTIONS)
+st.markdown("### 4) Forecast — if you follow the actions (After actions)")
+cost_after = cost_no_action * (1.0 - savings_pct)
+savings_eur = cost_no_action - cost_after
+
+colA2, colB2, colC2 = st.columns(3)
+with colA2:
+    st.markdown('<div class="ft-card"><div class="ft-kpi">Estimated cost (no action)</div>'
+                f'<div class="ft-kpi-val">{cost_no_action:,.2f} €</div></div>', unsafe_allow_html=True)
+with colB2:
+    st.markdown(f'<div class="ft-card"><div class="ft-kpi">Estimated cost (after actions, -{savings_pct*100:.1f}%)</div>'
+                f'<div class="ft-kpi-val">{cost_after:,.2f} €</div></div>', unsafe_allow_html=True)
+with colC2:
+    st.markdown('<div class="ft-card"><div class="ft-kpi">Estimated savings</div>'
+                f'<div class="ft-kpi-val">{savings_eur:,.2f} €</div></div>', unsafe_allow_html=True)
+
 st.markdown("---")
 st.caption(f"Project: {project_name} • Generated {datetime.now():%Y-%m-%d %H:%M}")
+
+# SECTION 5 — EXPORT (PDF)
+st.markdown("### 5) Export")
+if st.button("Generate Executive PDF"):
+    pdf_bytes = build_pdf(
+        df=data,
+        price_eur_per_kwh=price,
+        forecast_df=fc_df,
+        tips=tips_list,
+        savings_pct=savings_pct,
+        project=project_name,
+    )
+    st.download_button(
+        "Download Report (PDF)",
+        data=pdf_bytes,
+        file_name="FluxTwin_Report.pdf",
+        mime="application/pdf",
+    )
