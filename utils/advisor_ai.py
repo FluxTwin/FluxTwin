@@ -1,33 +1,78 @@
-import os
-from . import forecasting as fc
+# utils/advisor_ai.py
+from __future__ import annotations
+import numpy as np
+import pandas as pd
 
-def smart_advice(profile: dict, kpis: dict, forecast_df):
+def smart_advice(profile: dict, kpis: dict | None = None, forecast_df: pd.DataFrame | None = None) -> dict:
     """
-    Rule+AI-ready συμβουλές.
-    Αν υπάρχει OPENAI_API_KEY στο περιβάλλον, μπορείς να καλέσεις μοντέλο αργότερα.
-    Τώρα δίνουμε στοχευμένες προτάσεις με βάση τύπο χρήστη & forecast.
+    Επιστρέφει λεξικό με:
+      - tips: λίστα από actionable προτάσεις (strings)
+      - expected_savings_pct: εκτιμώμενο ποσοστό εξοικονόμησης (0–1)
+
+    Το ποσοστό είναι συντηρητικό και προσαρμόζεται με βάση το προφίλ
+    και (αν υπάρχει) τη μεταβλητότητα του forecast.
     """
-    typ = (profile.get("type") or "general").lower()
-    price = float(profile.get("price_eur_per_kwh", 0.25))
-    horizon_kwh = float(forecast_df["forecast_kwh"].sum()) if forecast_df is not None else 0.0
-    est_cost = horizon_kwh * price
+    usage = (profile.get("type") or "office").lower()
+    has_pv = bool(profile.get("has_pv", True))
 
-    tips = []
-    if typ in ["hotel", "hospitality", "office"]:
-        tips += [
-            "Shift HVAC setpoints by +1°C during peak hours to cut 5–10% cooling load.",
-            "Automate lighting with occupancy sensors in low-traffic corridors.",
-        ]
-    if typ in ["factory","industrial"]:
-        tips += [
-            "Move non-critical processes to off-peak hours; aim to shave 10–15% peak demand.",
-            "Check compressed-air leaks; typical savings 5–8%.",
-        ]
-    if profile.get("has_pv", False):
-        tips += ["Schedule high-load appliances when PV output is highest (11:00–15:00)."]
+    # Βασικές ζώνες (συντηρητικές) ανά χρήση
+    base = {
+        "household": (0.07, 0.12),
+        "office":    (0.10, 0.18),
+        "hotel":     (0.08, 0.15),
+        "factory":   (0.05, 0.12),
+    }
+    lo, hi = base.get(usage, (0.08, 0.14))
 
-    if est_cost > 0:
-        tips.insert(0, f"Projected energy cost next window: ~€{est_cost:,.2f}. Target a 7–15% cut with the actions below.")
-    if not tips:
-        tips = ["Reduce simultaneous use of high-load devices during 11:00–18:00.", "Switch to LED and timer controls."]
-    return tips
+    # Μικρή προσαύξηση αν υπάρχει μεγάλη μεταβλητότητα στο forecast
+    if isinstance(forecast_df, pd.DataFrame) and "forecast_kwh" in forecast_df:
+        vol = float(np.std(forecast_df["forecast_kwh"])) if len(forecast_df) > 1 else 0.0
+        bump = min(0.03, vol / 500.0)  # πολύ συντηρητικό
+        hi = min(hi + bump, 0.22)
+
+    # Αν υπάρχει PV, λίγο υψηλότερη δυνητική εξοικονόμηση
+    if has_pv:
+        lo += 0.01
+        hi += 0.01
+
+    expected = round((lo + hi) / 2, 3)
+
+    # Actionable tips ανά προφίλ
+    tips: list[str] = []
+    if usage in ("office", "hotel"):
+        tips += [
+            "Shift non-critical loads to off-peak hours (servers backup, laundry).",
+            "HVAC setpoints: +1 °C in cooling / −1 °C in heating outside peak hours.",
+            "Install occupancy sensors & daylight dimming in corridors/meeting rooms.",
+            "Weekly schedule review: turn off AHUs/VRF per zone after 18:00.",
+        ]
+    if usage == "hotel":
+        tips += [
+            "Hot-water recirculation: timer + temperature band control.",
+            "Pool filtration to off-peak; cover pool at night to reduce losses.",
+        ]
+    if usage == "factory":
+        tips += [
+            "Compressors: fix leaks, cascaded pressure setpoints, regular maintenance.",
+            "Stagger high-load machines (15-min ramps) to flatten peaks.",
+        ]
+    if usage == "household":
+        tips += [
+            "Time-shift dishwasher/washing machine to off-peak.",
+            "Smart plugs for standby killers (TV, set-top boxes, chargers).",
+        ]
+
+    # PV-related
+    if has_pv:
+        tips += [
+            "Run heat-pumps/boilers for pre-heating water during PV peak (11:00–15:00).",
+            "Consider small battery (3–5 kWh) to shave evening peaks.",
+        ]
+
+    # Κοινές πρακτικές
+    tips += [
+        "Create a simple weekly energy checklist; assign an owner per system.",
+        "Enable automated alerts when hourly usage >120% of baseline.",
+    ]
+
+    return {"tips": tips, "expected_savings_pct": expected}
