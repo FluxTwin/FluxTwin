@@ -1,72 +1,124 @@
 # utils/pdf_report.py
-from io import BytesIO
+from __future__ import annotations
 from datetime import datetime
 
-import matplotlib.pyplot as plt
 import pandas as pd
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 
-def _build_kpis_table(df: pd.DataFrame) -> Table:
-    total_kwh = float(df["consumption_kwh"].sum())
-    avg_kwh   = float(df["consumption_kwh"].mean())
-    max_kwh   = float(df["consumption_kwh"].max())
-    min_kwh   = float(df["consumption_kwh"].min())
-    rows = [
-        ["Metric", "Value"],
-        ["Total consumption (kWh)", f"{total_kwh:,.2f}"],
-        ["Average sample (kWh)",   f"{avg_kwh:,.2f}"],
-        ["Max sample (kWh)",       f"{max_kwh:,.2f}"],
-        ["Min sample (kWh)",       f"{min_kwh:,.2f}"],
-    ]
-    tbl = Table(rows, colWidths=[8*cm, 6*cm])
-    tbl.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#F2F4F7")),
-        ('GRID', (0,0), (-1,-1), 0.4, colors.HexColor("#D0D5DD")),
-        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-        ('ALIGN', (1,1), (-1,-1), 'RIGHT'),
-        ('BOTTOMPADDING', (0,0), (-1,0), 8),
-    ]))
-    return tbl
+def _styles():
+    ss = getSampleStyleSheet()
+    title = ParagraphStyle("TitleX", parent=ss["Title"], fontSize=20, leading=24, spaceAfter=10)
+    h2    = ParagraphStyle("H2", parent=ss["Heading2"], fontSize=14, spaceBefore=10, spaceAfter=6)
+    body  = ParagraphStyle("Body", parent=ss["BodyText"], fontSize=10, leading=14)
+    mono  = ParagraphStyle("Mono", parent=ss["BodyText"], fontName="Helvetica", fontSize=9)
+    bullet = ParagraphStyle("Bullet", parent=body, leftIndent=12, bulletIndent=6, spaceAfter=4)
+    return title, h2, body, mono, bullet
 
-def _build_chart_image(df: pd.DataFrame) -> BytesIO:
-    fig, ax = plt.subplots(figsize=(8.2, 4.2), dpi=140)
-    ax.plot(df["timestamp"], df["consumption_kwh"], label="Consumption (kWh)")
-    if "production_kwh" in df.columns:
-        ax.plot(df["timestamp"], df["production_kwh"], label="Production (kWh)")
-    ax.set_xlabel("Time"); ax.set_ylabel("kWh (per sample)")
-    ax.grid(True, alpha=0.25); ax.legend(loc="upper right")
-    buf = BytesIO(); fig.tight_layout(); fig.savefig(buf, format="png"); plt.close(fig); buf.seek(0)
-    return buf
+def create_report(
+    df: pd.DataFrame,
+    advisor_text_or_list,
+    price_eur_per_kwh: float = 0.25,
+    expected_savings_pct: float = 0.12,
+    forecast_df: pd.DataFrame | None = None,
+    out_path: str = "FluxTwin_Report.pdf",
+) -> str:
+    """Δημιουργεί enterprise-style PDF με KPIs, Cost analysis, Forecast summary, Recommendations."""
+    title, h2, body, mono, bullet = _styles()
 
-def create_report(df: pd.DataFrame, advice_text: str, out_path: str = "FluxTwin_Report.pdf") -> str:
-    df = df.copy(); df["timestamp"] = pd.to_datetime(df["timestamp"])
-    doc = SimpleDocTemplate(out_path, pagesize=A4, leftMargin=2*cm, rightMargin=2*cm, topMargin=1.6*cm, bottomMargin=1.6*cm)
-    styles = getSampleStyleSheet(); styles.add(ParagraphStyle(name="Small", fontSize=9, leading=12))
+    doc = SimpleDocTemplate(
+        out_path, pagesize=A4,
+        leftMargin=2*cm, rightMargin=2*cm, topMargin=1.5*cm, bottomMargin=1.5*cm
+    )
     story = []
-    story.append(Paragraph("<b>FluxTwin — Energy Report</b>", styles["Title"]))
-    story.append(Spacer(1, 6)); story.append(Paragraph(f"Generated: {datetime.now():%Y-%m-%d %H:%M}", styles["Small"]))
-    story.append(Spacer(1, 12))
-    story.append(_build_kpis_table(df)); story.append(Spacer(1, 12))
-    story.append(Paragraph("<b>Advisor recommendation</b>", styles["Heading2"]))
-    story.append(Paragraph(advice_text.replace("\n", "<br/>"), styles["BodyText"]))
-    story.append(Spacer(1, 12))
-    story.append(Paragraph("<b>Consumption chart</b>", styles["Heading2"]))
-    chart_buf = _build_chart_image(df)
-    story.append(Image(chart_buf, width=16.5*cm, height=8.0*cm))
-    story.append(Spacer(1, 6))
-    story.append(Paragraph("<b>Daily summary</b>", styles["Heading2"]))
-    daily = df.set_index("timestamp")["consumption_kwh"].resample("D").sum().dropna()
-    rows = [["Date", "Consumption (kWh)"]] + [[d.strftime("%Y-%m-%d"), f"{kwh:,.2f}"] for d, kwh in daily.items()]
-    day_tbl = Table(rows, colWidths=[7*cm, 6*cm])
-    day_tbl.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#F2F4F7")),
-        ('GRID', (0,0), (-1,-1), 0.25, colors.HexColor("#E4E7EC")),
-        ('ALIGN', (1,1), (-1,-1), 'RIGHT'),
+
+    # Header
+    story += [
+        Paragraph("FluxTwin — Energy Report", title),
+        Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", mono),
+        Spacer(1, 6),
+    ]
+
+    # KPIs
+    total = float(df["consumption_kwh"].sum())
+    avg   = float(df["consumption_kwh"].mean()) if len(df) else 0.0
+    mx    = float(df["consumption_kwh"].max()) if len(df) else 0.0
+    mn    = float(df["consumption_kwh"].min()) if len(df) else 0.0
+
+    baseline_cost  = total * float(price_eur_per_kwh)
+    projected_cost = baseline_cost * max(0.0, 1.0 - float(expected_savings_pct))
+    savings_eur    = baseline_cost - projected_cost
+
+    story += [Paragraph("Key metrics", h2)]
+    kpi_tbl = Table(
+        [
+            ["Metric", "Value"],
+            ["Total consumption (kWh)", f"{total:,.2f}"],
+            ["Average sample (kWh)", f"{avg:,.2f}"],
+            ["Max sample (kWh)", f"{mx:,.2f}"],
+            ["Min sample (kWh)", f"{mn:,.2f}"],
+        ],
+        hAlign="LEFT",
+        colWidths=[7*cm, 8*cm],
+    )
+    kpi_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), colors.lightgrey),
+        ("GRID", (0,0), (-1,-1), 0.25, colors.grey),
+        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ("ALIGN", (1,1), (-1,-1), "RIGHT"),
     ]))
-    story.append(day_tbl)
+    story += [kpi_tbl, Spacer(1, 10)]
+
+    # Costs
+    story += [Paragraph("Cost analysis", h2)]
+    cost_tbl = Table(
+        [
+            ["Electricity price (€/kWh)", f"{price_eur_per_kwh:.3f} €"],
+            ["Baseline cost (this period)", f"{baseline_cost:,.2f} €"],
+            [f"Projected cost (−{expected_savings_pct*100:.1f}% savings)", f"{projected_cost:,.2f} €"],
+            ["Estimated savings", f"{savings_eur:,.2f} €"],
+        ],
+        hAlign="LEFT",
+        colWidths=[9*cm, 6*cm],
+    )
+    cost_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), colors.whitesmoke),
+        ("GRID", (0,0), (-1,-1), 0.25, colors.grey),
+        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ("ALIGN", (1,0), (-1,-1), "RIGHT"),
+    ]))
+    story += [cost_tbl, Spacer(1, 10)]
+
+    # Forecast (optional)
+    if isinstance(forecast_df, pd.DataFrame) and "forecast_kwh" in forecast_df:
+        story += [Paragraph("7–30 day forecast (summary)", h2)]
+        tot_fc = float(forecast_df["forecast_kwh"].sum())
+        fc_cost = tot_fc * float(price_eur_per_kwh)
+        story += [Paragraph(
+            f"Projected energy for horizon: <b>{tot_fc:,.0f} kWh</b> "
+            f" (~{fc_cost:,.2f} € at {price_eur_per_kwh:.3f} €/kWh).",
+            body
+        ), Spacer(1, 6)]
+
+    # Recommendations
+    story += [Paragraph("Actionable recommendations", h2)]
+    if isinstance(advisor_text_or_list, (list, tuple)):
+        for tip in advisor_text_or_list:
+            story.append(Paragraph(f"• {tip}", bullet))
+    else:
+        for line in str(advisor_text_or_list).splitlines():
+            if line.strip():
+                story.append(Paragraph(f"• {line.strip()}", bullet))
+    story += [Spacer(1, 10)]
+
+    story += [Paragraph(
+        "Note: Savings are estimates based on profile and operational patterns. "
+        "For higher accuracy, enable live data streaming and tariff-aware optimization.",
+        mono
+    )]
+
     doc.build(story)
     return out_path
