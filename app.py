@@ -1,4 +1,4 @@
-# app.py — FluxTwin Live Energy Advisor (stable)
+# app.py — FluxTwin Live Energy Advisor (stable + Forecast/ROI/Anomaly tabs)
 import os
 from datetime import datetime
 
@@ -7,7 +7,10 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+# core utils you ήδη έχεις
 from utils import advisor, pdf_report
+# νέα modules για τις Ιδέες 1–3
+from utils import forecasting, roi, anomaly, advisor_ai
 
 # ---------- PAGE CONFIG ----------
 st.set_page_config(page_title="FluxTwin - Live Energy Advisor", layout="wide")
@@ -160,11 +163,11 @@ else:
 with st.expander("Dataset KPIs", expanded=True):
     kpi_row(data, price_per_kwh=price)
 
-# Advisor
+# Advisor (baseline rule-based)
 suggestion = advisor.get_advice(consumption=cons, production=prod)
 st.info(f"💡 Advisor: {suggestion}")
 
-# Plot
+# Plot history
 y_cols = ["consumption_kwh"]
 if "production_kwh" in data.columns and data["production_kwh"].any():
     y_cols.append("production_kwh")
@@ -178,12 +181,70 @@ fig = px.line(
 )
 st.plotly_chart(fig, use_container_width=True)
 
-# Optional: show simple daily table if there are many rows/hours
+# Daily table
 with st.expander("Daily summary table"):
     day = data.set_index("timestamp")["consumption_kwh"].resample("D").sum().dropna()
     st.dataframe(day.reset_index().rename(columns={"timestamp": "date", "consumption_kwh": "daily_kwh"}))
 
-# Export PDF
+# ---------- NEW: TABS FOR IDEAS 1–3 ----------
+st.markdown("---")
+tab1, tab2, tab3 = st.tabs(["🔮 Forecast", "☀️ Solar ROI", "🛠 Predictive Maintenance"])
+
+# TAB 1 — Forecast (Idea 1)
+with tab1:
+    horizon = st.slider("Forecast horizon (days)", 7, 30, 7)
+    fc_df = forecasting.daily_forecast(data, horizon_days=horizon)
+    price_for_fc = st.number_input("Price for forecast (€ / kWh)", min_value=0.0, value=price, step=0.01)
+    if not fc_df.empty:
+        fc_df["cost_eur"] = fc_df["forecast_kwh"] * price_for_fc
+        st.write(f"Method: **{fc_df['method'].iloc[0]}**")
+        st.dataframe(fc_df[["date","forecast_kwh","cost_eur"]].rename(columns={
+            "date":"Date", "forecast_kwh":"Forecast (kWh)", "cost_eur":"Estimated cost (€)"
+        }))
+        fig_fc = px.line(fc_df, x="date", y="forecast_kwh", title="Daily forecast (kWh)")
+        st.plotly_chart(fig_fc, use_container_width=True)
+
+        with st.expander("AI Advisor (profile-aware)"):
+            profile = {
+                "type": st.selectbox("Usage type", ["Household","Office","Hotel","Factory"], index=1).lower(),
+                "price_eur_per_kwh": price_for_fc,
+                "has_pv": st.checkbox("Has PV system", value=True),
+            }
+            kpis = {}
+            tips = advisor_ai.smart_advice(profile, kpis, fc_df)
+            for t in tips:
+                st.markdown(f"- {t}")
+
+# TAB 2 — Solar ROI (Idea 2)
+with tab2:
+    st.caption("Quick PV ROI for Cyprus (defaults without weather API).")
+    c1, c2, c3 = st.columns(3)
+    kw_p = c1.number_input("PV size (kWp)", min_value=0.5, value=5.0, step=0.5)
+    capex = c2.number_input("CAPEX (€)", min_value=500.0, value=7000.0, step=100.0)
+    selfc = c3.slider("Self-consumption (%)", 40, 100, 80) / 100.0
+    res = roi.simulate_roi(kw_p, price_eur_per_kwh=price, capex_eur=capex, self_consumption_ratio=selfc)
+    colA, colB, colC, colD = st.columns(4)
+    colA.metric("Daily PV (kWh)", f"{res['daily_kwh']:.1f}")
+    colB.metric("Annual PV (kWh)", f"{res['annual_kwh']:,.0f}")
+    colC.metric("Annual savings (€)", f"{res['annual_savings_eur']:,.0f}")
+    colD.metric("Payback (years)", f"{res['payback_years']:.1f}")
+    with st.expander("Assumptions"):
+        st.json(res["assumptions"])
+
+# TAB 3 — Predictive Maintenance (Idea 3)
+with tab3:
+    st.caption("Detect anomalies & estimate failure risk from consumption patterns.")
+    an = anomaly.detect_anomalies(data, window=24, z_thresh=3.0)
+    if not an.empty:
+        st.dataframe(an.tail(50))
+        fig_an = px.scatter(an, x="timestamp", y="consumption_kwh", color="is_anomaly",
+                            title="Anomalies (rolling z-score)")
+        st.plotly_chart(fig_an, use_container_width=True)
+    health = anomaly.failure_score(data, days=14)
+    st.metric("Health risk score (0 good → 1 bad)", f"{health['score']:.2f}")
+    st.caption(health["note"])
+
+# ---------- Export PDF ----------
 st.subheader("Export")
 if st.button("Generate PDF Report"):
     pdf_path = pdf_report.create_report(data, suggestion)
