@@ -1,7 +1,8 @@
-# app.py — FluxTwin Enterprise (AI Advisor + Holt-Winters Forecast + Pro PDF via utils/pdf_report.py)
+# app.py — FluxTwin Enterprise (Branding + Theme Toggle + AI + Holt-Winters + Pro PDF)
 from __future__ import annotations
 import json
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -17,40 +18,101 @@ except Exception:
 # ---------- Pro PDF module (external) ----------
 from utils import pdf_report
 import importlib
-importlib.reload(pdf_report)  # force reload in case of server cache
+importlib.reload(pdf_report)  # ensure latest version loads
 
-# ------------- PAGE CONFIG & THEME -------------
+# ---------- PAGE CONFIG ----------
 st.set_page_config(page_title="FluxTwin — Enterprise Energy Intelligence", layout="wide")
-CUSTOM_CSS = """
-<style>
-:root {
-  --ft-bg: #0b1220;
-  --ft-card: #10182a;
-  --ft-accent: #4ea1ff;
-  --ft-text: #ecf2ff;
-  --ft-muted: #94a3b8;
-}
-html, body, .stApp { background: var(--ft-bg) !important; color: var(--ft-text) !important; }
-h1, h2, h3, h4 { color: var(--ft-text) !important; }
-.ft-card {
-  background: var(--ft-card);
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 18px;
-  padding: 18px 18px 8px 18px;
-  box-shadow: 0 10px 30px rgba(0,0,0,.25);
-}
-.ft-kpi { font-size: 14px; color: var(--ft-muted); margin-bottom: 4px; }
-.ft-kpi-val { font-size: 22px; font-weight: 700; color: var(--ft-text); }
-hr { border: none; height: 1px; background: rgba(255,255,255,0.1); margin: 18px 0; }
-</style>
-"""
-st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
-# ---------- Debug: ποιο PDF module χρησιμοποιείται; ----------
-st.caption(f"PDF module path: {pdf_report.__file__}")
-st.caption(f"PDF module version: {getattr(pdf_report, '__version__', 'unknown')}")
+# ---------- THEME HELPER ----------
+def themed_css(mode: str = "Dark") -> str:
+    dark = """
+    :root {
+      --ft-bg: #0b1220;
+      --ft-card: #10182a;
+      --ft-accent: #4ea1ff;
+      --ft-text: #ecf2ff;
+      --ft-muted: #94a3b8;
+      --ft-border: rgba(255,255,255,0.08);
+    }
+    """
+    light = """
+    :root {
+      --ft-bg: #f8fafc;
+      --ft-card: #ffffff;
+      --ft-accent: #2563eb;
+      --ft-text: #0f172a;
+      --ft-muted: #64748b;
+      --ft-border: rgba(15,23,42,0.08);
+    }
+    """
+    base = dark if mode == "Dark" else light
+    return f"""
+    <style>
+    {base}
+    html, body, .stApp {{ background: var(--ft-bg) !important; color: var(--ft-text) !important; }}
+    h1, h2, h3, h4 {{ color: var(--ft-text) !important; }}
+    .ft-card {{
+      background: var(--ft-card);
+      border: 1px solid var(--ft-border);
+      border-radius: 18px;
+      padding: 18px 18px 8px 18px;
+      box-shadow: 0 10px 30px rgba(0,0,0,.10);
+    }}
+    .ft-kpi {{ font-size: 14px; color: var(--ft-muted); margin-bottom: 4px; }}
+    .ft-kpi-val {{ font-size: 22px; font-weight: 700; color: var(--ft-text); }}
+    .ft-brand {{
+      display:flex; align-items:center; gap:12px; border-bottom:1px solid var(--ft-border);
+      padding:8px 0 16px 0; margin-bottom:12px;
+    }}
+    .ft-brand img {{ height:32px; width:auto; border-radius:8px; }}
+    .ft-brand .title {{ font-weight:800; font-size:20px; letter-spacing:.3px; }}
+    .ft-brand .subtitle {{ color: var(--ft-muted); font-size:13px; margin-top:-4px; }}
+    .ft-pill {{
+      display:inline-block; padding:4px 10px; border-radius:999px; border:1px solid var(--ft-border);
+      color: var(--ft-muted); font-size:12px;
+    }}
+    .block-container {{ padding-top: 1.2rem; }}
+    </style>
+    """
 
-# ------------- HELPERS (DATA) -------------
+# ---------- SIDEBAR (with theme) ----------
+st.sidebar.title("FluxTwin — Controls")
+theme_mode = st.sidebar.radio("Theme", ["Dark", "Light"], index=0, horizontal=True)
+st.markdown(themed_css(theme_mode), unsafe_allow_html=True)
+
+project_name = st.sidebar.text_input("Project name", value="FluxTwin")
+price = st.sidebar.number_input("Electricity price (€/kWh)", min_value=0.0, value=0.25, step=0.01)
+mode = st.sidebar.selectbox("Data mode", ["Upload CSV", "Live simulation (in-app)", "Watch realtime CSV (local)"])
+horizon = st.sidebar.slider("Forecast horizon (days)", 7, 30, 7)
+
+st.sidebar.markdown("---")
+usage_type = st.sidebar.selectbox("Usage type", ["Household","Office","Hotel","Factory"], index=1)
+has_pv = st.sidebar.checkbox("Has PV system", value=True)
+ai_enabled = st.sidebar.toggle("AI Advisor (OpenAI)", value=True)
+st.sidebar.caption("If AI=ON, set OPENAI_API_KEY in Streamlit Secrets.")
+
+# ---------- BRAND BAR ----------
+logo_path = Path("assets/logo.png")
+with st.container():
+    col_logo, col_title, col_right = st.columns([0.08, 0.62, 0.30])
+    with col_logo:
+        if logo_path.exists():
+            st.markdown(f'<div class="ft-brand"><img src="data:image/png;base64,{Path(logo_path).read_bytes().hex()}"/></div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="ft-brand"><span class="ft-pill">FLUX</span></div>', unsafe_allow_html=True)
+    with col_title:
+        st.markdown(f"""
+        <div class="ft-brand">
+          <div>
+            <div class="title">FluxTwin — Enterprise Energy Intelligence</div>
+            <div class="subtitle">Operational visibility • Forecasted cost • AI actions • Measurable savings</div>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+    with col_right:
+        st.caption(f"PDF module: {getattr(pdf_report, '__version__', 'unknown')}")
+
+# ---------- DATA HELPERS ----------
 def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize CSV columns into [timestamp, consumption_kwh, production_kwh]."""
     if df is None or df.empty:
@@ -111,7 +173,7 @@ def daily_series(df: pd.DataFrame) -> pd.Series:
     return s
 
 
-# ------------- FORECAST (Holt-Winters + fallback) -------------
+# ---------- FORECAST (Holt-Winters + fallback) ----------
 def forecast_daily(df: pd.DataFrame, horizon_days: int = 7) -> pd.DataFrame:
     """
     Returns dataframe: [date, forecast_kwh, method]
@@ -124,7 +186,6 @@ def forecast_daily(df: pd.DataFrame, horizon_days: int = 7) -> pd.DataFrame:
         return pd.DataFrame({"date": idx, "forecast_kwh": [mean]*horizon_days, "method": "naive-mean"})
 
     try:
-        # Lazy import for wider compatibility on Streamlit Cloud
         from statsmodels.tsa.holtwinters import ExponentialSmoothing
         model = ExponentialSmoothing(s, trend="add", seasonal=None).fit()
         f = model.forecast(horizon_days)
@@ -135,7 +196,7 @@ def forecast_daily(df: pd.DataFrame, horizon_days: int = 7) -> pd.DataFrame:
         return pd.DataFrame({"date": idx, "forecast_kwh": [mean]*horizon_days, "method": "naive-fallback"})
 
 
-# ------------- RULE-BASED ADVISOR (fallback) -------------
+# ---------- RULE-BASED ADVISOR (fallback) ----------
 def rule_based_advice(profile: dict, forecast_df: pd.DataFrame | None) -> dict:
     usage = (profile.get("type") or "office").lower()
     has_pv = bool(profile.get("has_pv", True))
@@ -191,7 +252,7 @@ def rule_based_advice(profile: dict, forecast_df: pd.DataFrame | None) -> dict:
     return {"tips": tips, "expected_savings_pct": expected}
 
 
-# ------------- AI ADVISOR (OpenAI JSON) -------------
+# ---------- AI ADVISOR (OpenAI JSON) ----------
 def ai_advice_openai(profile: dict, kpis: dict, fc_df: pd.DataFrame, api_key: str, model: str = "gpt-4o-mini") -> dict:
     """
     Returns dict: { tips: [..], expected_savings_pct: 0.xx }
@@ -233,20 +294,7 @@ def ai_advice_openai(profile: dict, kpis: dict, fc_df: pd.DataFrame, api_key: st
         return rule_based_advice(profile, fc_df)
 
 
-# ------------- SIDEBAR -------------
-st.sidebar.title("FluxTwin — Controls")
-project_name = st.sidebar.text_input("Project name", value="FluxTwin")
-price = st.sidebar.number_input("Electricity price (€/kWh)", min_value=0.0, value=0.25, step=0.01)
-mode = st.sidebar.selectbox("Data mode", ["Upload CSV", "Live simulation (in-app)", "Watch realtime CSV (local)"])
-horizon = st.sidebar.slider("Forecast horizon (days)", 7, 30, 7)
-
-st.sidebar.markdown("---")
-usage_type = st.sidebar.selectbox("Usage type", ["Household","Office","Hotel","Factory"], index=1)
-has_pv = st.sidebar.checkbox("Has PV system", value=True)
-ai_enabled = st.sidebar.toggle("AI Advisor (OpenAI)", value=True)
-st.sidebar.caption("If AI=ON, set OPENAI_API_KEY in Streamlit Secrets.")
-
-# ------------- DATA SOURCE -------------
+# ---------- DATA SOURCE ----------
 data = pd.DataFrame(columns=["timestamp", "consumption_kwh", "production_kwh"])
 
 if mode == "Upload CSV":
@@ -271,10 +319,7 @@ elif mode == "Watch realtime CSV (local)":
     if st.button("Refresh now"):
         data = load_csv_any(path)
 
-# ------------- LAYOUT: ENTERPRISE SECTIONS -------------
-st.title("⚡ FluxTwin — Enterprise Energy Intelligence")
-st.caption("Operational visibility • Forecasted cost • AI actions • Measurable savings")
-
+# ---------- CONTENT ----------
 if data.empty or "consumption_kwh" not in data.columns:
     st.warning("No data yet. Upload a CSV or generate Live simulation ticks.")
     st.stop()
@@ -303,7 +348,6 @@ with st.container():
         st.markdown('<div class="ft-card"><div class="ft-kpi">Estimated cost (current period)</div>'
                     f'<div class="ft-kpi-val">{est_cost_now:,.2f} €</div></div>', unsafe_allow_html=True)
 
-    # History chart
     y_cols = ["consumption_kwh"]
     if "production_kwh" in data.columns and data["production_kwh"].any():
         y_cols.append("production_kwh")
@@ -379,7 +423,7 @@ with colC2:
                 f'<div class="ft-kpi-val">{savings_eur:,.2f} €</div></div>', unsafe_allow_html=True)
 
 st.markdown("---")
-st.caption(f"Project: {project_name} • Generated {datetime.now():%Y-%m-%d %H:%M}")
+st.caption(f"Project: {project_name} • Generated {datetime.now():%Y-%m-%d %H:%M} • PDF: {getattr(pdf_report, '__version__', 'unknown')}")
 
 # SECTION 5 — EXPORT (PDF via utils/pdf_report)
 st.markdown("### 5) Export")
