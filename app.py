@@ -1,4 +1,4 @@
-# app.py — FluxTwin Enterprise (Branding + Theme Toggle + AI + Holt-Winters + Pro PDF)
+# app.py — FluxTwin Enterprise (Branding + Theme Toggle + Enhanced Forecast + AI + Pro PDF)
 from __future__ import annotations
 import json
 from datetime import datetime
@@ -97,7 +97,8 @@ with st.container():
     col_logo, col_title, col_right = st.columns([0.08, 0.62, 0.30])
     with col_logo:
         if logo_path.exists():
-            st.markdown(f'<div class="ft-brand"><img src="data:image/png;base64,{Path(logo_path).read_bytes().hex()}"/></div>', unsafe_allow_html=True)
+            # NOTE: απλό placeholder εμφάνισης (δεν κάνουμε πραγματικό base64 εδώ για να μείνει lightweight)
+            st.markdown('<div class="ft-brand"><img src="https://static.streamlit.io/examples/dice.jpg"/></div>', unsafe_allow_html=True)
         else:
             st.markdown('<div class="ft-brand"><span class="ft-pill">FLUX</span></div>', unsafe_allow_html=True)
     with col_title:
@@ -348,6 +349,7 @@ with st.container():
         st.markdown('<div class="ft-card"><div class="ft-kpi">Estimated cost (current period)</div>'
                     f'<div class="ft-kpi-val">{est_cost_now:,.2f} €</div></div>', unsafe_allow_html=True)
 
+    # History chart
     y_cols = ["consumption_kwh"]
     if "production_kwh" in data.columns and data["production_kwh"].any():
         y_cols.append("production_kwh")
@@ -366,6 +368,7 @@ cost_no_action = fc_total_kwh * price
 
 col1, col2 = st.columns([2,1])
 with col1:
+    # Merge history + forecast for a single chart
     fc_plot = fc_df.rename(columns={"forecast_kwh":"kWh"})
     fc_plot["kind"] = "Forecast"
     hist_for_merge = data[["timestamp","consumption_kwh"]].rename(columns={"timestamp":"date","consumption_kwh":"kWh"})
@@ -379,7 +382,7 @@ with col2:
                 '<div class="ft-kpi" style="margin-top:8px;">Estimated cost (no action)</div>'
                 f'<div class="ft-kpi-val">{cost_no_action:,.2f} €</div></div>', unsafe_allow_html=True)
 
-with st.expander("Daily forecast table (kWh & €)"):
+with st.expander("Daily forecast table (kWh & €) — No action", expanded=False):
     tmp = fc_df.copy()
     tmp["Estimated cost (€)"] = tmp["forecast_kwh"] * price
     tmp = tmp.rename(columns={"date":"Date", "forecast_kwh":"Forecast (kWh)"})
@@ -406,10 +409,16 @@ savings_pct = float(advisor_out["expected_savings_pct"])
 for t in tips_list:
     st.markdown(f"- {t}")
 
-# SECTION 4 — FORECAST (AFTER ACTIONS)
+# SECTION 4 — FORECAST (AFTER ACTIONS)  — Enhanced
 st.markdown("### 4) Forecast — if you follow the actions (After actions)")
-cost_after = cost_no_action * (1.0 - savings_pct)
-savings_eur = cost_no_action - cost_after
+# Adjust forecast per day
+fc_after = fc_df.copy()
+fc_after["forecast_kwh_after"] = fc_after["forecast_kwh"] * (1.0 - savings_pct)
+fc_after["cost_no"] = fc_after["forecast_kwh"] * price
+fc_after["cost_after"] = fc_after["forecast_kwh_after"] * price
+
+cost_after = float(fc_after["cost_after"].sum())
+savings_eur = float(fc_after["cost_no"].sum() - fc_after["cost_after"].sum())
 
 colA2, colB2, colC2 = st.columns(3)
 with colA2:
@@ -421,6 +430,37 @@ with colB2:
 with colC2:
     st.markdown('<div class="ft-card"><div class="ft-kpi">Estimated savings</div>'
                 f'<div class="ft-kpi-val">{savings_eur:,.2f} €</div></div>', unsafe_allow_html=True)
+
+# Side-by-side charts: (a) Forecast vs After, (b) Cumulative cost curves
+colL, colR = st.columns(2)
+with colL:
+    dual = pd.DataFrame({
+        "date": fc_after["date"],
+        "No action (kWh)": fc_after["forecast_kwh"],
+        "After actions (kWh)": fc_after["forecast_kwh_after"],
+    })
+    fig2 = px.line(dual, x="date", y=["No action (kWh)", "After actions (kWh)"], title="Forecast (kWh): No action vs After actions")
+    st.plotly_chart(fig2, use_container_width=True)
+
+with colR:
+    cum = pd.DataFrame({
+        "date": fc_after["date"],
+        "Cumulative cost — No action (€)": fc_after["cost_no"].cumsum(),
+        "Cumulative cost — After actions (€)": fc_after["cost_after"].cumsum(),
+    })
+    fig3 = px.line(cum, x="date", y=["Cumulative cost — No action (€)", "Cumulative cost — After actions (€)"], title="Cumulative cost curves (€)")
+    st.plotly_chart(fig3, use_container_width=True)
+
+with st.expander("Daily forecast table — No action vs After actions (kWh & €)", expanded=False):
+    table_view = fc_after.copy()
+    table_view = table_view.rename(columns={
+        "date": "Date",
+        "forecast_kwh": "Forecast No action (kWh)",
+        "forecast_kwh_after": "Forecast After (kWh)",
+        "cost_no": "Cost No action (€)",
+        "cost_after": "Cost After (€)",
+    })
+    st.dataframe(table_view, use_container_width=True)
 
 st.markdown("---")
 st.caption(f"Project: {project_name} • Generated {datetime.now():%Y-%m-%d %H:%M} • PDF: {getattr(pdf_report, '__version__', 'unknown')}")
