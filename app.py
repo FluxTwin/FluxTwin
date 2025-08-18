@@ -1,6 +1,5 @@
-# app.py — FluxTwin Enterprise (AI Advisor + Holt-Winters Forecast + Sections + PDF)
+# app.py — FluxTwin Enterprise (AI Advisor + Holt-Winters Forecast + Pro PDF via utils/pdf_report.py)
 from __future__ import annotations
-import io
 import json
 from datetime import datetime
 
@@ -15,12 +14,10 @@ try:
 except Exception:
     OpenAI = None
 
-# PDF (ReportLab)
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.units import cm
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+# ---------- Pro PDF module (external) ----------
+from utils import pdf_report
+import importlib
+importlib.reload(pdf_report)  # force reload in case of server cache
 
 # ------------- PAGE CONFIG & THEME -------------
 st.set_page_config(page_title="FluxTwin — Enterprise Energy Intelligence", layout="wide")
@@ -48,6 +45,10 @@ hr { border: none; height: 1px; background: rgba(255,255,255,0.1); margin: 18px 
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+
+# ---------- Debug: ποιο PDF module χρησιμοποιείται; ----------
+st.caption(f"PDF module path: {pdf_report.__file__}")
+st.caption(f"PDF module version: {getattr(pdf_report, '__version__', 'unknown')}")
 
 # ------------- HELPERS (DATA) -------------
 def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -232,95 +233,6 @@ def ai_advice_openai(profile: dict, kpis: dict, fc_df: pd.DataFrame, api_key: st
         return rule_based_advice(profile, fc_df)
 
 
-# ------------- PDF (ReportLab) -------------
-def _pdf_styles():
-    ss = getSampleStyleSheet()
-    title = ParagraphStyle("TitleX", parent=ss["Title"], fontSize=20, leading=24, spaceAfter=10)
-    h2    = ParagraphStyle("H2", parent=ss["Heading2"], fontSize=14, spaceBefore=10, spaceAfter=6)
-    body  = ParagraphStyle("Body", parent=ss["BodyText"], fontSize=10, leading=14)
-    mono  = ParagraphStyle("Mono", parent=ss["BodyText"], fontName="Helvetica", fontSize=9)
-    bullet = ParagraphStyle("Bullet", parent=body, leftIndent=12, bulletIndent=6, spaceAfter=4)
-    return title, h2, body, mono, bullet
-
-def build_pdf(
-    df: pd.DataFrame,
-    price_eur_per_kwh: float,
-    forecast_df: pd.DataFrame,
-    tips: list[str],
-    savings_pct: float,
-    project: str,
-) -> bytes:
-    title, h2, body, mono, bullet = _pdf_styles()
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=2*cm, rightMargin=2*cm, topMargin=1.5*cm, bottomMargin=1.5*cm)
-    story = []
-
-    story += [Paragraph("FluxTwin — Energy Report", title),
-              Paragraph(f"Project: {project}", mono),
-              Paragraph(f"Generated: {datetime.now():%Y-%m-%d %H:%M}", mono),
-              Spacer(1, 6)]
-
-    # KPIs
-    total = float(df["consumption_kwh"].sum())
-    avg   = float(df["consumption_kwh"].mean()) if len(df) else 0.0
-    mx    = float(df["consumption_kwh"].max()) if len(df) else 0.0
-    mn    = float(df["consumption_kwh"].min()) if len(df) else 0.0
-    baseline_cost = total * float(price_eur_per_kwh)
-
-    story += [Paragraph("Current period — KPIs", h2)]
-    kpi_tbl = Table(
-        [["Metric","Value"],
-         ["Total consumption (kWh)", f"{total:,.2f}"],
-         ["Average sample (kWh)", f"{avg:,.2f}"],
-         ["Max sample (kWh)", f"{mx:,.2f}"],
-         ["Min sample (kWh)", f"{mn:,.2f}"],
-         ["Baseline cost (this period)", f"{baseline_cost:,.2f} €"]],
-        colWidths=[8*cm, 7*cm],
-    )
-    kpi_tbl.setStyle(TableStyle([
-        ("BACKGROUND",(0,0),(-1,0), colors.lightgrey),
-        ("GRID",(0,0),(-1,-1), 0.25, colors.grey),
-        ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-        ("ALIGN",(1,1),(-1,-1),"RIGHT"),
-    ]))
-    story += [kpi_tbl, Spacer(1,10)]
-
-    # Forecast summary & costs
-    if isinstance(forecast_df, pd.DataFrame) and "forecast_kwh" in forecast_df:
-        story += [Paragraph("Forecast (7–30 days) — summary", h2)]
-        tot_fc = float(forecast_df["forecast_kwh"].sum())
-        cost_no_action = tot_fc * float(price_eur_per_kwh)
-        cost_after = cost_no_action * (1.0 - float(savings_pct))
-        savings_eur = cost_no_action - cost_after
-
-        c_tbl = Table(
-            [["Metric","Value"],
-             ["Forecast method", forecast_df["method"].iloc[0]],
-             ["Forecast total (kWh)", f"{tot_fc:,.0f}"],
-             ["Estimated cost (no action)", f"{cost_no_action:,.2f} €"],
-             [f"Estimated cost (after actions, -{savings_pct*100:.1f}%)", f"{cost_after:,.2f} €"],
-             ["Estimated savings (€)", f"{savings_eur:,.2f} €"]],
-            colWidths=[8*cm, 7*cm],
-        )
-        c_tbl.setStyle(TableStyle([
-            ("BACKGROUND",(0,0),(-1,0), colors.whitesmoke),
-            ("GRID",(0,0),(-1,-1), 0.25, colors.grey),
-            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-            ("ALIGN",(1,1),(-1,-1),"RIGHT"),
-        ]))
-        story += [c_tbl, Spacer(1,10)]
-
-    # Recommendations
-    story += [Paragraph("Next 7 Days — Action plan", h2)]
-    for t in tips:
-        story.append(Paragraph(f"• {t}", bullet))
-    story += [Spacer(1,8)]
-    story += [Paragraph("Note: Savings are indicative, based on profile & operational patterns.", mono)]
-
-    doc.build(story)
-    return buf.getvalue()
-
-
 # ------------- SIDEBAR -------------
 st.sidebar.title("FluxTwin — Controls")
 project_name = st.sidebar.text_input("Project name", value="FluxTwin")
@@ -469,20 +381,20 @@ with colC2:
 st.markdown("---")
 st.caption(f"Project: {project_name} • Generated {datetime.now():%Y-%m-%d %H:%M}")
 
-# SECTION 5 — EXPORT (PDF)
+# SECTION 5 — EXPORT (PDF via utils/pdf_report)
 st.markdown("### 5) Export")
 if st.button("Generate Executive PDF"):
-    pdf_bytes = build_pdf(
+    pdf_path = pdf_report.create_report(
         df=data,
+        advisor_text_or_list=tips_list,   # μπορείς να περάσεις και σκέτο string
         price_eur_per_kwh=price,
+        expected_savings_pct=savings_pct,
         forecast_df=fc_df,
-        tips=tips_list,
-        savings_pct=savings_pct,
-        project=project_name,
     )
-    st.download_button(
-        "Download Report (PDF)",
-        data=pdf_bytes,
-        file_name="FluxTwin_Report.pdf",
-        mime="application/pdf",
-    )
+    with open(pdf_path, "rb") as f:
+        st.download_button(
+            "Download Report (PDF)",
+            f,
+            file_name="FluxTwin_Report.pdf",
+            mime="application/pdf",
+        )
