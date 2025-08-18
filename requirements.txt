@@ -4,11 +4,11 @@ streamlit>=1.36,<2
 # --- Data stack ---
 pandas>=2.2.2,<3
 numpy>=1.26.0,<3
-scipy>=1.10,<2        # <- απαραίτητο για statsmodels
+scipy>=1.10,<2        # απαραίτητο για statsmodels
 
 # --- Charts ---
 plotly>=5.22,<6
-matplotlib>=3.8,<3.9   # <- για τα charts στο PDF
+matplotlib>=3.8,<3.9  # <- για τα charts στο PDF
 
 # --- Forecast (Holt–Winters) ---
 statsmodels>=0.14.2,<0.15
