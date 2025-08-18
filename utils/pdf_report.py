@@ -1,124 +1,128 @@
 # utils/pdf_report.py
-from __future__ import annotations
+import os
 from datetime import datetime
+import tempfile
 
+import matplotlib.pyplot as plt
 import pandas as pd
+
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import (
+    SimpleDocTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle,
+    Image,
+)
 
-def _styles():
-    ss = getSampleStyleSheet()
-    title = ParagraphStyle("TitleX", parent=ss["Title"], fontSize=20, leading=24, spaceAfter=10)
-    h2    = ParagraphStyle("H2", parent=ss["Heading2"], fontSize=14, spaceBefore=10, spaceAfter=6)
-    body  = ParagraphStyle("Body", parent=ss["BodyText"], fontSize=10, leading=14)
-    mono  = ParagraphStyle("Mono", parent=ss["BodyText"], fontName="Helvetica", fontSize=9)
-    bullet = ParagraphStyle("Bullet", parent=body, leftIndent=12, bulletIndent=6, spaceAfter=4)
-    return title, h2, body, mono, bullet
+# ---------- HELPER: plot chart to image ----------
+def save_chart_as_img(df: pd.DataFrame, path: str):
+    plt.figure(figsize=(7, 3))
+    plt.plot(df["timestamp"], df["consumption_kwh"], label="Consumption (kWh)", color="red")
+    if "production_kwh" in df.columns and df["production_kwh"].any():
+        plt.plot(df["timestamp"], df["production_kwh"], label="Production (kWh)", color="green")
+    plt.xlabel("Time")
+    plt.ylabel("kWh")
+    plt.title("Consumption vs Production")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(path)
+    plt.close()
 
-def create_report(
-    df: pd.DataFrame,
-    advisor_text_or_list,
-    price_eur_per_kwh: float = 0.25,
-    expected_savings_pct: float = 0.12,
-    forecast_df: pd.DataFrame | None = None,
-    out_path: str = "FluxTwin_Report.pdf",
-) -> str:
-    """Δημιουργεί enterprise-style PDF με KPIs, Cost analysis, Forecast summary, Recommendations."""
-    title, h2, body, mono, bullet = _styles()
+# ---------- CREATE REPORT ----------
+def create_report(df: pd.DataFrame, advisor_text: str, price_per_kwh: float = 0.25) -> str:
+    tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    pdf_path = tmp_file.name
+    tmp_file.close()
 
-    doc = SimpleDocTemplate(
-        out_path, pagesize=A4,
-        leftMargin=2*cm, rightMargin=2*cm, topMargin=1.5*cm, bottomMargin=1.5*cm
-    )
+    doc = SimpleDocTemplate(pdf_path, pagesize=A4)
     story = []
 
-    # Header
-    story += [
-        Paragraph("FluxTwin — Energy Report", title),
-        Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", mono),
-        Spacer(1, 6),
-    ]
+    styles = getSampleStyleSheet()
+    title_style = styles["Title"]
+    normal = styles["Normal"]
+    subtitle = ParagraphStyle("Subtitle", parent=styles["Heading2"], spaceAfter=10)
 
-    # KPIs
+    # ---------- Title ----------
+    story.append(Paragraph("⚡ FluxTwin — Energy Efficiency Report", title_style))
+    story.append(Spacer(1, 12))
+    story.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", normal))
+    story.append(Spacer(1, 24))
+
+    # ---------- KPIs ----------
     total = float(df["consumption_kwh"].sum())
-    avg   = float(df["consumption_kwh"].mean()) if len(df) else 0.0
-    mx    = float(df["consumption_kwh"].max()) if len(df) else 0.0
-    mn    = float(df["consumption_kwh"].min()) if len(df) else 0.0
+    avg = float(df["consumption_kwh"].mean())
+    mx = float(df["consumption_kwh"].max())
+    est_cost = total * price_per_kwh
 
-    baseline_cost  = total * float(price_eur_per_kwh)
-    projected_cost = baseline_cost * max(0.0, 1.0 - float(expected_savings_pct))
-    savings_eur    = baseline_cost - projected_cost
-
-    story += [Paragraph("Key metrics", h2)]
-    kpi_tbl = Table(
-        [
-            ["Metric", "Value"],
-            ["Total consumption (kWh)", f"{total:,.2f}"],
-            ["Average sample (kWh)", f"{avg:,.2f}"],
-            ["Max sample (kWh)", f"{mx:,.2f}"],
-            ["Min sample (kWh)", f"{mn:,.2f}"],
-        ],
-        hAlign="LEFT",
-        colWidths=[7*cm, 8*cm],
-    )
-    kpi_tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), colors.lightgrey),
-        ("GRID", (0,0), (-1,-1), 0.25, colors.grey),
-        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-        ("ALIGN", (1,1), (-1,-1), "RIGHT"),
+    kpi_data = [
+        ["Metric", "Value"],
+        ["Total Consumption", f"{total:,.2f} kWh"],
+        ["Average per sample", f"{avg:,.2f} kWh"],
+        ["Max consumption", f"{mx:,.2f} kWh"],
+        ["Estimated Cost", f"{est_cost:,.2f} €"],
+    ]
+    table = Table(kpi_data, hAlign="LEFT")
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
     ]))
-    story += [kpi_tbl, Spacer(1, 10)]
+    story.append(Paragraph("Key Performance Indicators", subtitle))
+    story.append(table)
+    story.append(Spacer(1, 24))
 
-    # Costs
-    story += [Paragraph("Cost analysis", h2)]
-    cost_tbl = Table(
-        [
-            ["Electricity price (€/kWh)", f"{price_eur_per_kwh:.3f} €"],
-            ["Baseline cost (this period)", f"{baseline_cost:,.2f} €"],
-            [f"Projected cost (−{expected_savings_pct*100:.1f}% savings)", f"{projected_cost:,.2f} €"],
-            ["Estimated savings", f"{savings_eur:,.2f} €"],
-        ],
-        hAlign="LEFT",
-        colWidths=[9*cm, 6*cm],
-    )
-    cost_tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), colors.whitesmoke),
-        ("GRID", (0,0), (-1,-1), 0.25, colors.grey),
-        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-        ("ALIGN", (1,0), (-1,-1), "RIGHT"),
-    ]))
-    story += [cost_tbl, Spacer(1, 10)]
+    # ---------- Chart ----------
+    story.append(Paragraph("Consumption & Production Overview", subtitle))
+    chart_path = os.path.join(tempfile.gettempdir(), "chart.png")
+    save_chart_as_img(df, chart_path)
+    story.append(Image(chart_path, width=16 * cm, height=7 * cm))
+    story.append(Spacer(1, 24))
 
-    # Forecast (optional)
-    if isinstance(forecast_df, pd.DataFrame) and "forecast_kwh" in forecast_df:
-        story += [Paragraph("7–30 day forecast (summary)", h2)]
-        tot_fc = float(forecast_df["forecast_kwh"].sum())
-        fc_cost = tot_fc * float(price_eur_per_kwh)
-        story += [Paragraph(
-            f"Projected energy for horizon: <b>{tot_fc:,.0f} kWh</b> "
-            f" (~{fc_cost:,.2f} € at {price_eur_per_kwh:.3f} €/kWh).",
-            body
-        ), Spacer(1, 6)]
+    # ---------- Forecast ----------
+    story.append(Paragraph("Forecast (7–30 days)", subtitle))
+    daily = df.set_index("timestamp")["consumption_kwh"].resample("D").sum().dropna()
+    if len(daily) > 2:
+        baseline = daily.mean()
+        forecast_7 = baseline * 7
+        forecast_30 = baseline * 30
 
-    # Recommendations
-    story += [Paragraph("Actionable recommendations", h2)]
-    if isinstance(advisor_text_or_list, (list, tuple)):
-        for tip in advisor_text_or_list:
-            story.append(Paragraph(f"• {tip}", bullet))
+        forecast_cost_7 = forecast_7 * price_per_kwh
+        forecast_cost_30 = forecast_30 * price_per_kwh
+
+        forecast_data = [
+            ["Period", "Forecast kWh", "Forecast Cost (€)"],
+            ["7 days", f"{forecast_7:,.2f}", f"{forecast_cost_7:,.2f} €"],
+            ["30 days", f"{forecast_30:,.2f}", f"{forecast_cost_30:,.2f} €"],
+        ]
+        ftable = Table(forecast_data, hAlign="LEFT")
+        ftable.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.darkblue),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+        ]))
+        story.append(ftable)
     else:
-        for line in str(advisor_text_or_list).splitlines():
-            if line.strip():
-                story.append(Paragraph(f"• {line.strip()}", bullet))
-    story += [Spacer(1, 10)]
+        story.append(Paragraph("⚠ Not enough data for forecast", normal))
+    story.append(Spacer(1, 24))
 
-    story += [Paragraph(
-        "Note: Savings are estimates based on profile and operational patterns. "
-        "For higher accuracy, enable live data streaming and tariff-aware optimization.",
-        mono
-    )]
+    # ---------- Advisor ----------
+    story.append(Paragraph("Energy Saving Recommendations", subtitle))
+    story.append(Paragraph(advisor_text, normal))
+    story.append(Spacer(1, 12))
+
+    # ---------- Wrap up ----------
+    story.append(Paragraph(
+        "This report was generated automatically by FluxTwin Energy Advisor. "
+        "For best results, consider combining these recommendations with smart energy management systems.",
+        normal
+    ))
 
     doc.build(story)
-    return out_path
+    return pdf_path
