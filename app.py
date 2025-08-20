@@ -1,4 +1,4 @@
-# app.py — FluxTwin Enterprise (Devices + Smart Advisor + Live Alerts + AI + Holt-Winters + Pro PDF)
+# app.py — FluxTwin Enterprise (Devices + Smart Advisor + Live Alerts + AI + Holt-Winters + Pro PDF + Live URL)
 from __future__ import annotations
 import json
 from datetime import datetime, timedelta
@@ -63,7 +63,12 @@ st.markdown(themed_css(theme_mode), unsafe_allow_html=True)
 
 project_name = st.sidebar.text_input("Project name", value="FluxTwin")
 price = st.sidebar.number_input("Electricity price (€/kWh)", min_value=0.0, value=0.25, step=0.01)
-mode = st.sidebar.selectbox("Data mode", ["Upload CSV", "Live simulation (in-app)", "Watch realtime CSV (local)"])
+
+# ➕ Προσθέτουμε το νέο Live URL mode στη λίστα
+mode = st.sidebar.selectbox(
+    "Data mode",
+    ["Upload CSV", "Live simulation (in-app)", "Watch realtime CSV (local)", "Live URL (CSV/Google Sheet)"]
+)
 horizon = st.sidebar.slider("Forecast horizon (days)", 7, 30, 14)
 
 st.sidebar.markdown("---")
@@ -129,7 +134,7 @@ def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
     else:
         x["timestamp"] = pd.date_range(end=datetime.now(), periods=len(x), freq="H")
     for col in ["consumption_kwh","production_kwh"]:
-        if col in x.columns: x[col] = pd.to_numeric(x[col], errors="coerce").fillna(0.0)
+        if col in x.columns: x[col] = pd.to_numeric(col=x[col], errors="coerce").fillna(0.0)
     if "consumption_kwh" not in x.columns: x["consumption_kwh"] = 0.0
     if "production_kwh" not in x.columns: x["production_kwh"] = 0.0
     base = ["timestamp","consumption_kwh","production_kwh"]
@@ -149,6 +154,36 @@ def daily_series(df: pd.DataFrame) -> pd.Series:
     x = x.dropna(subset=["timestamp"])
     if x.empty: return pd.Series(dtype=float)
     return x.set_index("timestamp")["consumption_kwh"].resample("D").sum().dropna()
+
+# --- Live URL loader (manual TTL cache; works on Streamlit Cloud reliably) ---
+def _fetch_csv_url(url: str) -> pd.DataFrame:
+    # πιο ανθεκτικό διάβασμα (auto delimiter sniffing)
+    return pd.read_csv(url, sep=None, engine="python", on_bad_lines="skip")
+
+def get_live_csv(url: str, ttl_sec: int = 30, force: bool = False) -> tuple[pd.DataFrame, bool]:
+    """
+    Επιστρέφει (df, refreshed_flag). Χρησιμοποιεί st.session_state ως cache με TTL.
+    - Αν force=True, αγνοεί το TTL και ξανακατεβάζει τώρα.
+    """
+    if "live_cache" not in st.session_state:
+        st.session_state.live_cache = {}
+    key = f"live_cache::{url}"
+    now = datetime.now().timestamp()
+    entry = st.session_state.live_cache.get(key)
+
+    must_refresh = (
+        force or
+        (entry is None) or
+        (now - entry["ts"] >= ttl_sec)
+    )
+
+    if must_refresh:
+        df_raw = _fetch_csv_url(url)
+        df_std = standardize_columns(df_raw)
+        st.session_state.live_cache[key] = {"df": df_std, "ts": now}
+        return df_std, True
+
+    return entry["df"], False
 
 # ---------- FORECAST ----------
 def forecast_daily(df: pd.DataFrame, horizon_days: int = 7) -> pd.DataFrame:
@@ -182,7 +217,7 @@ def rule_based_advice(profile: dict, forecast_df: pd.DataFrame | None) -> dict:
     expected = round((lo + hi) / 2, 3)
     tips = [
         "Create a weekly energy checklist; assign owners.",
-               "Enable alerts when hourly usage >120% of baseline.",
+        "Enable alerts when hourly usage >120% of baseline.",
     ]
     return {"tips": tips, "expected_savings_pct": expected}
 
@@ -211,9 +246,12 @@ def ai_advice_openai(profile: dict, kpis: dict, fc_df: pd.DataFrame, api_key: st
 
 # ---------- DATA SOURCE ----------
 data = pd.DataFrame(columns=["timestamp","consumption_kwh","production_kwh"])
+
 if mode == "Upload CSV":
     uploaded = st.file_uploader("Upload CSV (timestamp, consumption_kwh[, production_kwh])", type=["csv"])
-    if uploaded: data = load_csv_any(uploaded)
+    if uploaded:
+        data = load_csv_any(uploaded)
+
 elif mode == "Live simulation (in-app)":
     st.write("Click **Add tick** to append a new reading.")
     if "sim_data" not in st.session_state:
@@ -225,10 +263,27 @@ elif mode == "Live simulation (in-app)":
         new_row = pd.DataFrame([[now,cons,prod]], columns=["timestamp","consumption_kwh","production_kwh"])
         st.session_state.sim_data = pd.concat([st.session_state.sim_data, new_row], ignore_index=True)
     data = standardize_columns(st.session_state.sim_data)
+
 elif mode == "Watch realtime CSV (local)":
     path = st.text_input("Path to realtime CSV (e.g. realtime_data.csv)", value="realtime_data.csv")
     if st.button("Refresh now"):
         data = load_csv_any(path)
+
+elif mode == "Live URL (CSV/Google Sheet)":
+    st.info("Paste a direct CSV URL (public S3/Dropbox/Drive direct link ή Google Sheet export σε CSV).")
+    url = st.text_input("Live CSV URL", value="", placeholder="https://.../something.csv")
+    ttl = st.slider("Auto-refresh every (seconds)", 10, 120, 30, help="Το app ξανατραβάει το URL ανά αυτό το διάστημα.")
+    force = st.button("Force refresh now")
+
+    if url:
+        try:
+            data, refreshed = get_live_csv(url, ttl_sec=ttl, force=force)
+            st.success(f"Loaded {len(data):,} rows. Refreshed: {refreshed}")
+            st.caption("Σημείωση: το Streamlit ανανεώνει στο interaction (scroll/κλικ). Το 'Force refresh' αγνοεί το TTL.")
+        except Exception as e:
+            st.error(f"Failed to load CSV from URL: {e}")
+    else:
+        st.warning("Δώσε ένα έγκυρο CSV URL για live ανάγνωση.")
 
 # ---------- GUARD ----------
 if data.empty or "consumption_kwh" not in data.columns:
