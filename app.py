@@ -182,7 +182,7 @@ def rule_based_advice(profile: dict, forecast_df: pd.DataFrame | None) -> dict:
     expected = round((lo + hi) / 2, 3)
     tips = [
         "Create a weekly energy checklist; assign owners.",
-        "Enable alerts when hourly usage >120% of baseline.",
+               "Enable alerts when hourly usage >120% of baseline.",
     ]
     return {"tips": tips, "expected_savings_pct": expected}
 
@@ -397,6 +397,26 @@ with colR:
 
 st.markdown("---")
 st.caption(f"Project: {project_name} • Generated {datetime.now():%Y-%m-%d %H:%M} • PDF: {getattr(pdf_report, '__version__', 'unknown')}")
+
+# ---------- Diagnostics (temporary) ----------
+with st.expander("🔧 Diagnostics (temporary)", expanded=False):
+    # 1) Check OpenAI key presence (δεν εμφανίζουμε το key)
+    if st.button("Check OpenAI key"):
+        has_key = bool(st.secrets.get("OPENAI_API_KEY", ""))
+        st.success("OPENAI_API_KEY is set ✅") if has_key else st.error("OPENAI_API_KEY is MISSING ❌")
+
+    # 2) Send test email (αν έχεις βάλει SMTP secrets)
+    if st.button("Send TEST email alert"):
+        if smtp_ready(st.secrets):
+            ok, msg = send_email_alert(
+                st.secrets,
+                subject="[FluxTwin] Test Alert",
+                body="This is a test email from FluxTwin diagnostics.",
+                to=st.secrets.get("ALERT_TO", None)
+            )
+            st.success("Test email sent ✅") if ok else st.error(f"Email not sent ❌ — {msg}")
+        else:
+            st.warning("SMTP secrets are missing or incomplete.")
 
 # ---------- 7) Export (PDF) ----------
 st.markdown("### 7) Export")
